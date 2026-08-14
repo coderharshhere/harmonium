@@ -239,6 +239,36 @@
             }
         }
 
+        .auto-status {
+            font-size: 14px;
+            min-height: 24px;
+        }
+
+        .auto-note {
+            font-weight: bold;
+            color: #00695c;
+        }
+
+        .auto-help {
+            font-size: 13px;
+            color: #555;
+            line-height: 1.35;
+        }
+
+        .auto-meter {
+            background: #ddd;
+            border-radius: 8px;
+            height: 12px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .auto-meter-fill {
+            background: #009688;
+            height: 12px;
+            width: 0%;
+        }
+
         /* ─────────────────────────────────────────────────────────── */
     </style>
     <title>Web Harmonium - developed by Rajaraman Iyer</title>
@@ -682,6 +712,237 @@
             }
         }
 
+
+        var autoPlayEnabled = false;
+        var autoPlayMode = "mic";
+        var autoAnalyser = null;
+        var autoSource = null;
+        var autoMediaStream = null;
+        var autoMediaElement = null;
+        var autoMediaElementSource = null;
+        var autoAnimationId = null;
+        var autoCurrentNote = null;
+        var autoLastNoteStartedAt = 0;
+        var autoSilenceStartedAt = 0;
+        var autoMinConfidence = 0.35;
+        var autoSmoothingMs = 70;
+        var autoSilenceMs = 300;
+        var autoMinRms = 0.006;
+        var autoBuffer = null;
+
+        function frequencyToMidi(frequency) {
+            return Math.round(69 + 12 * Math.log2(frequency / 440));
+        }
+
+        function midiToName(note) {
+            return baseKeyNames[((note % 12) + 12) % 12] + Math.floor(note / 12 - 1);
+        }
+
+        function setAutoStatus(message) {
+            var status = document.getElementById('autoStatus');
+            if (status) {
+                status.innerText = message;
+            }
+        }
+
+        function updateAutoDisplay(note, frequency, confidence) {
+            var noteElement = document.getElementById('autoDetectedNote');
+            var frequencyElement = document.getElementById('autoDetectedFrequency');
+            var confidenceElement = document.getElementById('autoConfidence');
+            noteElement.innerText = note == null ? '-' : midiToName(note);
+            frequencyElement.innerText = frequency == null ? '-' : frequency.toFixed(1) + ' Hz';
+            confidenceElement.innerText = confidence == null ? '-' : Math.round(confidence * 100) + '%';
+        }
+
+        function updateAutoLevel(rms) {
+            var levelElement = document.getElementById('autoInputLevel');
+            if (levelElement) {
+                levelElement.style.width = Math.min(100, Math.round(rms * 800)) + '%';
+            }
+        }
+
+        function stopAutoNote() {
+            if (autoCurrentNote != null) {
+                noteOff(autoCurrentNote);
+                autoCurrentNote = null;
+            }
+        }
+
+        function changeAutoNote(note) {
+            if (note < 0 || note > 127) {
+                stopAutoNote();
+                return;
+            }
+            if (autoCurrentNote === note) {
+                return;
+            }
+            stopAutoNote();
+            noteOn(note);
+            autoCurrentNote = note;
+            autoLastNoteStartedAt = performance.now();
+        }
+
+        function detectPitch(timeDomainData, sampleRate) {
+            var size = timeDomainData.length;
+            var rms = 0;
+            var samples = new Float32Array(size);
+
+            for (var i = 0; i < size; i++) {
+                samples[i] = (timeDomainData[i] - 128) / 128;
+                rms += samples[i] * samples[i];
+            }
+            rms = Math.sqrt(rms / size);
+            updateAutoLevel(rms);
+            if (rms < autoMinRms) {
+                return null;
+            }
+
+            var minFrequency = 70;
+            var maxFrequency = 1200;
+            var minLag = Math.floor(sampleRate / maxFrequency);
+            var maxLag = Math.min(Math.floor(sampleRate / minFrequency), size - 1);
+            var bestLag = -1;
+            var bestCorrelation = 0;
+
+            for (var lag = minLag; lag <= maxLag; lag++) {
+                var numerator = 0;
+                var leftEnergy = 0;
+                var rightEnergy = 0;
+                for (var k = 0; k < size - lag; k++) {
+                    var left = samples[k];
+                    var right = samples[k + lag];
+                    numerator += left * right;
+                    leftEnergy += left * left;
+                    rightEnergy += right * right;
+                }
+                var denominator = Math.sqrt(leftEnergy * rightEnergy);
+                var correlation = denominator === 0 ? 0 : numerator / denominator;
+                if (correlation > bestCorrelation) {
+                    bestCorrelation = correlation;
+                    bestLag = lag;
+                }
+            }
+
+            if (bestLag === -1 || bestCorrelation < autoMinConfidence) {
+                return null;
+            }
+
+            return {
+                frequency: sampleRate / bestLag,
+                confidence: Math.min(bestCorrelation, 1)
+            };
+        }
+
+        function autoPlayLoop() {
+            if (!autoPlayEnabled || autoAnalyser == null) {
+                return;
+            }
+
+            autoAnalyser.getByteTimeDomainData(autoBuffer);
+            var detected = detectPitch(autoBuffer, context.sampleRate);
+            var now = performance.now();
+
+            if (detected == null) {
+                if (autoSilenceStartedAt === 0) {
+                    autoSilenceStartedAt = now;
+                }
+                if (now - autoSilenceStartedAt > autoSilenceMs) {
+                    stopAutoNote();
+                    updateAutoDisplay(null, null, null);
+                }
+            } else {
+                autoSilenceStartedAt = 0;
+                var note = frequencyToMidi(detected.frequency);
+                updateAutoDisplay(note, detected.frequency, detected.confidence);
+                if (autoCurrentNote == null || (autoCurrentNote !== note && now - autoLastNoteStartedAt > autoSmoothingMs)) {
+                    changeAutoNote(note);
+                }
+            }
+
+            autoAnimationId = requestAnimationFrame(autoPlayLoop);
+        }
+
+        function prepareAutoAnalyser() {
+            if (autoAnalyser == null) {
+                autoAnalyser = context.createAnalyser();
+                autoAnalyser.fftSize = 4096;
+                autoBuffer = new Uint8Array(autoAnalyser.fftSize);
+            }
+        }
+
+        function stopAutoPlay() {
+            autoPlayEnabled = false;
+            if (autoAnimationId != null) {
+                cancelAnimationFrame(autoAnimationId);
+                autoAnimationId = null;
+            }
+            stopAutoNote();
+            if (autoSource != null) {
+                try { autoSource.disconnect(autoAnalyser); } catch (err) {}
+                autoSource = null;
+            }
+            if (autoMediaStream != null) {
+                autoMediaStream.getTracks().forEach(function (track) { track.stop(); });
+                autoMediaStream = null;
+            }
+            setAutoStatus('Stopped');
+        }
+
+        function startAutoPlay() {
+            stopAutoPlay();
+            if (context == null) {
+                setAutoStatus('Load Module first.');
+                return;
+            }
+            if (context.state === 'suspended') {
+                context.resume();
+            }
+            autoPlayMode = document.getElementById('autoPlayMode').value;
+            prepareAutoAnalyser();
+            autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value) / 100;
+
+            if (autoPlayMode === 'mic' && (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)) {
+                setAutoStatus('Microphone works only on HTTPS or localhost in supported browsers.');
+                return;
+            }
+
+            if (autoPlayMode === 'file') {
+                var fileInput = document.getElementById('autoAudioFile');
+                if (!fileInput.files || fileInput.files.length === 0) {
+                    setAutoStatus('Choose an audio file first.');
+                    return;
+                }
+                if (autoMediaElement == null) {
+                    autoMediaElement = document.getElementById('autoAudioPlayer');
+                }
+                if (autoMediaElementSource == null) {
+                    autoMediaElementSource = context.createMediaElementSource(autoMediaElement);
+                }
+                autoMediaElement.src = URL.createObjectURL(fileInput.files[0]);
+                autoSource = autoMediaElementSource;
+                autoSource.connect(autoAnalyser);
+                autoAnalyser.connect(context.destination);
+                autoMediaElement.play();
+                autoPlayEnabled = true;
+                setAutoStatus('Following uploaded audio.');
+                autoPlayLoop();
+                return;
+            }
+
+            navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+                .then(function (stream) {
+                    autoMediaStream = stream;
+                    autoSource = context.createMediaStreamSource(stream);
+                    autoSource.connect(autoAnalyser);
+                    autoPlayEnabled = true;
+                    setAutoStatus('Listening. Sing or play audio near the microphone.');
+                    autoPlayLoop();
+                })
+                .catch(function (err) {
+                    setAutoStatus('Microphone failed: ' + err.message);
+                });
+        }
+
         if ("serviceWorker" in navigator) {
             window.addEventListener("load", function () {
                 navigator.serviceWorker.register("/serviceworker.js").then(reg => {
@@ -989,6 +1250,42 @@
                                 </tr>
                             </tbody>
                         </table>
+                    </div>
+
+                    <hr>
+
+                    <div class="w3-container w3-card w3-white">
+                        <h3 class="w3-color w3-blue-gray w3-center">AI Auto Accompaniment</h3>
+                        <p class="auto-help">
+                            Sing into the microphone, play a bhajan/Ramayanam recording nearby, or upload an audio file.
+                            The browser detects the strongest pitch and plays the closest harmonium note in real time.
+                            Best results come from clear monophonic vocals or one lead melody at a time.
+                        </p>
+                        <p class="auto-status">Status: <span id="autoStatus">Stopped</span></p>
+                        <table class="w3-table w3-small">
+                            <tr><td>Detected note</td><td class="auto-note" id="autoDetectedNote">-</td></tr>
+                            <tr><td>Frequency</td><td id="autoDetectedFrequency">-</td></tr>
+                            <tr><td>Confidence</td><td id="autoConfidence">-</td></tr>
+                        </table>
+                        <p>Mic/Input level</p>
+                        <div class="auto-meter"><div id="autoInputLevel" class="auto-meter-fill"></div></div>
+                        <p>
+                            <label>Input</label>
+                            <select id="autoPlayMode" class="w3-select">
+                                <option value="mic">Microphone / YouTube playing nearby</option>
+                                <option value="file">Uploaded audio file</option>
+                            </select>
+                        </p>
+                        <p>
+                            <label>Accuracy filter</label>
+                            <input type="range" min="20" max="85" value="35" class="slider" id="autoSensitivity">
+                        </p>
+                        <p><input id="autoAudioFile" class="w3-input" type="file" accept="audio/*"></p>
+                        <audio id="autoAudioPlayer" controls class="w3-block"></audio>
+                        <p class="w3-center">
+                            <button class="w3-button w3-teal" onclick="startAutoPlay()">Start AI Follow</button>
+                            <button class="w3-button w3-red" onclick="stopAutoPlay()">Stop</button>
+                        </p>
                     </div>
 
                 </div>
