@@ -258,20 +258,6 @@
             line-height: 1.35;
         }
 
-        .auto-meter {
-            background: #ddd;
-            border-radius: 8px;
-            height: 12px;
-            overflow: hidden;
-            width: 100%;
-        }
-
-        .auto-meter-fill {
-            background: #009688;
-            height: 12px;
-            width: 0%;
-        }
-
         /* ─────────────────────────────────────────────────────────── */
     </style>
     <title>Web Harmonium - developed by Rajaraman Iyer</title>
@@ -721,17 +707,16 @@
         var autoAnalyser = null;
         var autoSource = null;
         var autoMediaStream = null;
-        var autoDisplayStream = null;
         var autoMediaElement = null;
         var autoMediaElementSource = null;
         var autoAnimationId = null;
         var autoCurrentNote = null;
         var autoLastNoteStartedAt = 0;
         var autoSilenceStartedAt = 0;
-        var autoMinConfidence = 0.35;
-        var autoSmoothingMs = 70;
-        var autoSilenceMs = 300;
-        var autoMinRms = 0.006;
+        var autoMinConfidence = 0.72;
+        var autoSmoothingMs = 90;
+        var autoSilenceMs = 180;
+        var autoMinRms = 0.012;
         var autoBuffer = null;
 
         function frequencyToMidi(frequency) {
@@ -758,13 +743,6 @@
             confidenceElement.innerText = confidence == null ? '-' : Math.round(confidence * 100) + '%';
         }
 
-        function updateAutoLevel(rms) {
-            var levelElement = document.getElementById('autoInputLevel');
-            if (levelElement) {
-                levelElement.style.width = Math.min(100, Math.round(rms * 800)) + '%';
-            }
-        }
-
         function stopAutoNote() {
             if (autoCurrentNote != null) {
                 noteOff(autoCurrentNote);
@@ -789,38 +767,33 @@
         function detectPitch(timeDomainData, sampleRate) {
             var size = timeDomainData.length;
             var rms = 0;
-            var samples = new Float32Array(size);
-
             for (var i = 0; i < size; i++) {
-                samples[i] = (timeDomainData[i] - 128) / 128;
-                rms += samples[i] * samples[i];
+                var centered = timeDomainData[i] - 128;
+                rms += centered * centered;
             }
-            rms = Math.sqrt(rms / size);
-            updateAutoLevel(rms);
+            rms = Math.sqrt(rms / size) / 128;
             if (rms < autoMinRms) {
                 return null;
             }
 
-            var minFrequency = 70;
-            var maxFrequency = 1200;
+            var samples = new Float32Array(size);
+            for (var j = 0; j < size; j++) {
+                samples[j] = (timeDomainData[j] - 128) / 128;
+            }
+
+            var minFrequency = 75;
+            var maxFrequency = 1100;
             var minLag = Math.floor(sampleRate / maxFrequency);
             var maxLag = Math.min(Math.floor(sampleRate / minFrequency), size - 1);
             var bestLag = -1;
             var bestCorrelation = 0;
 
             for (var lag = minLag; lag <= maxLag; lag++) {
-                var numerator = 0;
-                var leftEnergy = 0;
-                var rightEnergy = 0;
+                var correlation = 0;
                 for (var k = 0; k < size - lag; k++) {
-                    var left = samples[k];
-                    var right = samples[k + lag];
-                    numerator += left * right;
-                    leftEnergy += left * left;
-                    rightEnergy += right * right;
+                    correlation += samples[k] * samples[k + lag];
                 }
-                var denominator = Math.sqrt(leftEnergy * rightEnergy);
-                var correlation = denominator === 0 ? 0 : numerator / denominator;
+                correlation = correlation / (size - lag);
                 if (correlation > bestCorrelation) {
                     bestCorrelation = correlation;
                     bestLag = lag;
@@ -889,10 +862,6 @@
                 autoMediaStream.getTracks().forEach(function (track) { track.stop(); });
                 autoMediaStream = null;
             }
-            if (autoDisplayStream != null) {
-                autoDisplayStream.getTracks().forEach(function (track) { track.stop(); });
-                autoDisplayStream = null;
-            }
             setAutoStatus('Stopped');
         }
 
@@ -908,36 +877,6 @@
             autoPlayMode = document.getElementById('autoPlayMode').value;
             prepareAutoAnalyser();
             autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value) / 100;
-
-            if (autoPlayMode === 'mic' && (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)) {
-                setAutoStatus('Microphone works only on HTTPS or localhost in supported browsers.');
-                return;
-            }
-
-            if (autoPlayMode === 'system') {
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-                    setAutoStatus('System audio capture is not supported in this browser. Use Chrome/Edge on localhost or HTTPS.');
-                    return;
-                }
-                navigator.mediaDevices.getDisplayMedia({ audio: true, video: true })
-                    .then(function (stream) {
-                        if (stream.getAudioTracks().length === 0) {
-                            stream.getTracks().forEach(function (track) { track.stop(); });
-                            setAutoStatus('No system audio shared. Choose a Chrome tab/window and enable Share audio.');
-                            return;
-                        }
-                        autoDisplayStream = stream;
-                        autoSource = context.createMediaStreamSource(stream);
-                        autoSource.connect(autoAnalyser);
-                        autoPlayEnabled = true;
-                        setAutoStatus('Listening to shared tab/system audio.');
-                        autoPlayLoop();
-                    })
-                    .catch(function (err) {
-                        setAutoStatus('System audio sharing failed: ' + err.message);
-                    });
-                return;
-            }
 
             if (autoPlayMode === 'file') {
                 var fileInput = document.getElementById('autoAudioFile');
@@ -1288,12 +1227,11 @@
                     <hr>
 
                     <div class="w3-container w3-card w3-white">
-                        <h3 class="w3-color w3-blue-gray w3-center">AI Auto Accompaniment v3</h3>
+                        <h3 class="w3-color w3-blue-gray w3-center">AI Auto Accompaniment</h3>
                         <p class="auto-help">
-                            Sing into the microphone, share a Chrome tab/system audio, play a bhajan/Ramayanam recording nearby, or upload an audio file.
+                            Sing into the microphone, play a bhajan/Ramayanam recording nearby, or upload an audio file.
                             The browser detects the strongest pitch and plays the closest harmonium note in real time.
                             Best results come from clear monophonic vocals or one lead melody at a time.
-                            If this section still shows old options, hard refresh once with Ctrl+F5.
                         </p>
                         <p class="auto-status">Status: <span id="autoStatus">Stopped</span></p>
                         <table class="w3-table w3-small">
@@ -1301,19 +1239,16 @@
                             <tr><td>Frequency</td><td id="autoDetectedFrequency">-</td></tr>
                             <tr><td>Confidence</td><td id="autoConfidence">-</td></tr>
                         </table>
-                        <p>Mic/Input level</p>
-                        <div class="auto-meter"><div id="autoInputLevel" class="auto-meter-fill"></div></div>
                         <p>
                             <label>Input</label>
                             <select id="autoPlayMode" class="w3-select">
-                                <option value="mic">Microphone / nearby speaker</option>
-                                <option value="system" selected>System/Chrome tab audio</option>
+                                <option value="mic">Microphone / YouTube playing nearby</option>
                                 <option value="file">Uploaded audio file</option>
                             </select>
                         </p>
                         <p>
                             <label>Accuracy filter</label>
-                            <input type="range" min="10" max="85" value="20" class="slider" id="autoSensitivity">
+                            <input type="range" min="55" max="90" value="72" class="slider" id="autoSensitivity">
                         </p>
                         <p><input id="autoAudioFile" class="w3-input" type="file" accept="audio/*"></p>
                         <audio id="autoAudioPlayer" controls class="w3-block"></audio>
