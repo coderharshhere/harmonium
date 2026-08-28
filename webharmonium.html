@@ -945,13 +945,12 @@
                 URL.revokeObjectURL(autoObjectUrl);
                 autoObjectUrl = null;
             }
-            if (autoMonitorGain != null) {
-                autoMonitorGain.gain.value = 0;
+            if (autoAnalyser != null) {
+                try { autoAnalyser.disconnect(); } catch (err) {}
             }
             autoLastAnalysisAt = 0;
             autoSilenceStartedAt = 0;
             updateAutoDisplay(null, null, null);
-            updateAutoLevel(0);
             setAutoStatus('Stopped');
         }
 
@@ -1010,6 +1009,7 @@
                 autoMediaElement.src = autoObjectUrl;
                 autoSource = autoMediaElementSource;
                 autoSource.connect(autoAnalyser);
+                autoAnalyser.connect(context.destination);
                 autoPlayEnabled = true;
                 setAutoStatus('Following uploaded audio.');
                 autoMediaElement.play().then(autoPlayLoop).catch(function (err) {
@@ -1351,8 +1351,7 @@
                     <div class="w3-container w3-card w3-white">
                         <h3 class="w3-color w3-blue-gray w3-center">AI Auto Accompaniment</h3>
                         <p class="auto-help">
-                            For YouTube or another browser tab, choose <strong>Shared browser tab or system audio</strong>, then select the tab and enable <strong>Share audio</strong>.
-                            You can also sing into the microphone or upload an audio file.
+                            Sing into the microphone, share a browser tab's audio, play a recording nearby, or upload an audio file.
                             The browser detects the strongest pitch and plays the closest harmonium note in real time.
                             Best results come from clear monophonic vocals or one lead melody at a time.
                         </p>
@@ -1368,7 +1367,7 @@
                             <label>Input</label>
                             <select id="autoPlayMode" class="w3-select">
                                 <option value="mic">Microphone / nearby speaker</option>
-                                <option value="system" selected>Shared browser tab or system audio</option>
+                                <option value="system">Shared browser tab or system audio</option>
                                 <option value="file">Uploaded audio file</option>
                             </select>
                         </p>
