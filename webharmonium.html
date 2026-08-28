@@ -258,6 +258,21 @@
             line-height: 1.35;
         }
 
+        .auto-meter {
+            background: #ddd;
+            border-radius: 8px;
+            height: 12px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .auto-meter-fill {
+            background: #009688;
+            height: 12px;
+            transition: width 80ms linear;
+            width: 0;
+        }
+
         /* ─────────────────────────────────────────────────────────── */
     </style>
     <title>Web Harmonium - developed by Rajaraman Iyer</title>
@@ -719,6 +734,7 @@
         var autoPlayEnabled = false;
         var autoPlayMode = "mic";
         var autoAnalyser = null;
+        var autoMonitorGain = null;
         var autoSource = null;
         var autoMediaStream = null;
         var autoDisplayStream = null;
@@ -760,6 +776,13 @@
             confidenceElement.innerText = confidence == null ? '-' : Math.round(confidence * 100) + '%';
         }
 
+        function updateAutoLevel(rms) {
+            var levelElement = document.getElementById('autoInputLevel');
+            if (levelElement) {
+                levelElement.style.width = Math.min(100, Math.round(rms * 300)) + '%';
+            }
+        }
+
         function stopAutoNote() {
             if (autoCurrentNote != null) {
                 noteOff(autoCurrentNote);
@@ -789,6 +812,7 @@
                 rms += centered * centered;
             }
             rms = Math.sqrt(rms / size) / 128;
+            updateAutoLevel(rms);
             if (rms < autoMinRms) {
                 return null;
             }
@@ -884,6 +908,12 @@
                 autoAnalyser = context.createAnalyser();
                 autoAnalyser.fftSize = 2048;
                 autoBuffer = new Uint8Array(autoAnalyser.fftSize);
+                // Keep the analyser graph active without playing microphone/system audio
+                // back through the speakers (which would cause feedback).
+                autoMonitorGain = context.createGain();
+                autoMonitorGain.gain.value = 0;
+                autoAnalyser.connect(autoMonitorGain);
+                autoMonitorGain.connect(context.destination);
             }
         }
 
@@ -935,6 +965,7 @@
             }
             autoPlayMode = document.getElementById('autoPlayMode').value;
             prepareAutoAnalyser();
+            autoMonitorGain.gain.value = autoPlayMode === 'file' ? 1 : 0;
             autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value) / 100;
 
             if (autoPlayMode === 'system') {
@@ -1330,6 +1361,8 @@
                             <tr><td>Frequency</td><td id="autoDetectedFrequency">-</td></tr>
                             <tr><td>Confidence</td><td id="autoConfidence">-</td></tr>
                         </table>
+                        <p>Input level</p>
+                        <div class="auto-meter" aria-label="Input level"><div id="autoInputLevel" class="auto-meter-fill"></div></div>
                         <p>
                             <label>Input</label>
                             <select id="autoPlayMode" class="w3-select">
