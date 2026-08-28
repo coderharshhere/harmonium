@@ -1,5 +1,5 @@
 // 1. Versioning: Change this string every time you update your app!
-const staticDevCoffee = "web-harmonium-v3";
+const staticDevCoffee = "web-harmonium-v4";
 
 const assets = [
   "/",
@@ -25,21 +25,29 @@ self.addEventListener("activate", activateEvent => {
       return Promise.all(
         keys.filter(key => key !== staticDevCoffee)
             .map(key => caches.delete(key))
-      );
+      ).then(() => self.clients.claim());
     })
   );
 });
 
 self.addEventListener("fetch", fetchEvent => {
+  if (fetchEvent.request.method !== "GET") {
+    return;
+  }
+
   fetchEvent.respondWith(
     fetch(fetchEvent.request)
       .then(networkResponse => {
+        if (!networkResponse.ok || networkResponse.type !== "basic") {
+          return networkResponse;
+        }
         const responseClone = networkResponse.clone();
-        caches.open(staticDevCoffee).then(cache => {
-          cache.put(fetchEvent.request, responseClone);
+        return caches.open(staticDevCoffee).then(cache => {
+          return cache.put(fetchEvent.request, responseClone).then(() => networkResponse);
         });
-        return networkResponse;
       })
-      .catch(() => caches.match(fetchEvent.request))
+      .catch(() => caches.match(fetchEvent.request).then(cachedResponse => {
+        return cachedResponse || Response.error();
+      }))
   );
 });
