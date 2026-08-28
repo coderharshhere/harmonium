@@ -258,6 +258,21 @@
             line-height: 1.35;
         }
 
+        .auto-meter {
+            background: #ddd;
+            border-radius: 8px;
+            height: 12px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .auto-meter-fill {
+            background: #009688;
+            height: 12px;
+            transition: width 80ms linear;
+            width: 0;
+        }
+
         /* ─────────────────────────────────────────────────────────── */
     </style>
     <title>Web Harmonium - developed by Rajaraman Iyer</title>
@@ -269,6 +284,7 @@
             context = null;
 
         var audioBuffer = null;
+        var moduleLoaded = false;
         var gainNode = null;
         var reverbNode = null;
         var useReverb = false;
@@ -375,6 +391,7 @@
             }
 
             document.getElementById('mainScreen').style.display = 'block'
+            moduleLoaded = true;
         }
 
         function setSourceNode(i) {
@@ -396,12 +413,12 @@
         function noteOff(note) {
             var i = note + octaveMap[currentOctave]
             if (debug) console.log("noteOff", note, "currentOctave", currentOctave, "i", i)
-            if (i < sourceNodes.length) {
+            if (i >= 0 && i < sourceNodes.length) {
                 setSourceNode(i)
             }
             for (c = 1; c <= stackCount; ++c) {
                 i = note + octaveMap[currentOctave + c]
-                if (i < sourceNodes.length) {
+                if (i >= 0 && i < sourceNodes.length) {
                     setSourceNode(i)
                 }
             }
@@ -410,13 +427,13 @@
         function noteOn(note) {
             var i = note + octaveMap[currentOctave]
             if (debug) console.log("noteOn", note, "currentOctave", currentOctave, "i", i)
-            if (i < sourceNodes.length && sourceNodeState[i] == 0) {
+            if (i >= 0 && i < sourceNodes.length && sourceNodeState[i] == 0) {
                 sourceNodes[i].start(0);
                 sourceNodeState[i] = 1
             }
             for (c = 1; c <= stackCount; ++c) {
                 i = note + octaveMap[currentOctave + c]
-                if (i < sourceNodes.length && sourceNodeState[i] == 0) {
+                if (i >= 0 && i < sourceNodes.length && sourceNodeState[i] == 0) {
                     sourceNodes[i].start(0);
                     sourceNodeState[i] = 1
                 }
@@ -478,6 +495,7 @@
             request1.send();
         }
         function load() {
+            moduleLoaded = false;
             context = new AudioContext();
 
             gainNode = context.createGain();
@@ -526,6 +544,11 @@
             request.responseType = 'arraybuffer';
 
             request.addEventListener('load', function () {
+                if (request.status < 200 || request.status >= 300) {
+                    console.error('ERROR: Could not load harmonium sample:', request.status);
+                    setAutoStatus('Could not load the harmonium sound. Refresh and try again.');
+                    return;
+                }
                 context.decodeAudioData(
                     request.response,
                     function (buffer) {
@@ -535,8 +558,14 @@
                     },
                     function (e) {
                         console.error('ERROR: context.decodeAudioData:', e);
+                        setAutoStatus('Could not decode the harmonium sound.');
                     }
                 );
+            });
+
+            request.addEventListener('error', function () {
+                console.error('ERROR: Could not request harmonium sample.');
+                setAutoStatus('Could not load the harmonium sound. Check your connection and retry.');
             });
 
             request.send();
@@ -705,11 +734,15 @@
         var autoPlayEnabled = false;
         var autoPlayMode = "mic";
         var autoAnalyser = null;
+        var autoMonitorGain = null;
         var autoSource = null;
         var autoMediaStream = null;
+        var autoDisplayStream = null;
         var autoMediaElement = null;
         var autoMediaElementSource = null;
+        var autoObjectUrl = null;
         var autoAnimationId = null;
+        var autoLastAnalysisAt = 0;
         var autoCurrentNote = null;
         var autoLastNoteStartedAt = 0;
         var autoSilenceStartedAt = 0;
@@ -743,6 +776,13 @@
             confidenceElement.innerText = confidence == null ? '-' : Math.round(confidence * 100) + '%';
         }
 
+        function updateAutoLevel(rms) {
+            var levelElement = document.getElementById('autoInputLevel');
+            if (levelElement) {
+                levelElement.style.width = Math.min(100, Math.round(rms * 300)) + '%';
+            }
+        }
+
         function stopAutoNote() {
             if (autoCurrentNote != null) {
                 noteOff(autoCurrentNote);
@@ -772,6 +812,7 @@
                 rms += centered * centered;
             }
             rms = Math.sqrt(rms / size) / 128;
+            updateAutoLevel(rms);
             if (rms < autoMinRms) {
                 return null;
             }
@@ -781,23 +822,41 @@
                 samples[j] = (timeDomainData[j] - 128) / 128;
             }
 
-            var minFrequency = 75;
+            var minFrequency = 80;
             var maxFrequency = 1100;
             var minLag = Math.floor(sampleRate / maxFrequency);
             var maxLag = Math.min(Math.floor(sampleRate / minFrequency), size - 1);
             var bestLag = -1;
             var bestCorrelation = 0;
+            var correlationBeforePrevious = 0;
+            var previousCorrelation = 0;
 
             for (var lag = minLag; lag <= maxLag; lag++) {
-                var correlation = 0;
+                var numerator = 0;
+                var leftEnergy = 0;
+                var rightEnergy = 0;
                 for (var k = 0; k < size - lag; k++) {
-                    correlation += samples[k] * samples[k + lag];
+                    var left = samples[k];
+                    var right = samples[k + lag];
+                    numerator += left * right;
+                    leftEnergy += left * left;
+                    rightEnergy += right * right;
                 }
-                correlation = correlation / (size - lag);
+                var denominator = Math.sqrt(leftEnergy * rightEnergy);
+                var correlation = denominator === 0 ? 0 : numerator / denominator;
                 if (correlation > bestCorrelation) {
                     bestCorrelation = correlation;
                     bestLag = lag;
                 }
+                if (lag > minLag + 1 && previousCorrelation >= autoMinConfidence &&
+                    previousCorrelation > correlationBeforePrevious && previousCorrelation >= correlation) {
+                    return {
+                        frequency: sampleRate / (lag - 1),
+                        confidence: Math.min(previousCorrelation, 1)
+                    };
+                }
+                correlationBeforePrevious = previousCorrelation;
+                previousCorrelation = correlation;
             }
 
             if (bestLag === -1 || bestCorrelation < autoMinConfidence) {
@@ -815,9 +874,14 @@
                 return;
             }
 
+            var now = performance.now();
+            if (now - autoLastAnalysisAt < 60) {
+                autoAnimationId = requestAnimationFrame(autoPlayLoop);
+                return;
+            }
+            autoLastAnalysisAt = now;
             autoAnalyser.getByteTimeDomainData(autoBuffer);
             var detected = detectPitch(autoBuffer, context.sampleRate);
-            var now = performance.now();
 
             if (detected == null) {
                 if (autoSilenceStartedAt === 0) {
@@ -842,8 +906,14 @@
         function prepareAutoAnalyser() {
             if (autoAnalyser == null) {
                 autoAnalyser = context.createAnalyser();
-                autoAnalyser.fftSize = 4096;
+                autoAnalyser.fftSize = 2048;
                 autoBuffer = new Uint8Array(autoAnalyser.fftSize);
+                // Keep the analyser graph active without playing microphone/system audio
+                // back through the speakers (which would cause feedback).
+                autoMonitorGain = context.createGain();
+                autoMonitorGain.gain.value = 0;
+                autoAnalyser.connect(autoMonitorGain);
+                autoMonitorGain.connect(context.destination);
             }
         }
 
@@ -862,13 +932,33 @@
                 autoMediaStream.getTracks().forEach(function (track) { track.stop(); });
                 autoMediaStream = null;
             }
+            if (autoDisplayStream != null) {
+                autoDisplayStream.getTracks().forEach(function (track) { track.stop(); });
+                autoDisplayStream = null;
+            }
+            if (autoMediaElement != null) {
+                autoMediaElement.pause();
+                autoMediaElement.removeAttribute('src');
+                autoMediaElement.load();
+            }
+            if (autoObjectUrl != null) {
+                URL.revokeObjectURL(autoObjectUrl);
+                autoObjectUrl = null;
+            }
+            if (autoMonitorGain != null) {
+                autoMonitorGain.gain.value = 0;
+            }
+            autoLastAnalysisAt = 0;
+            autoSilenceStartedAt = 0;
+            updateAutoDisplay(null, null, null);
+            updateAutoLevel(0);
             setAutoStatus('Stopped');
         }
 
         function startAutoPlay() {
             stopAutoPlay();
-            if (context == null) {
-                setAutoStatus('Load Module first.');
+            if (context == null || !moduleLoaded) {
+                setAutoStatus('Please wait for the harmonium module to finish loading.');
                 return;
             }
             if (context.state === 'suspended') {
@@ -876,7 +966,33 @@
             }
             autoPlayMode = document.getElementById('autoPlayMode').value;
             prepareAutoAnalyser();
+            autoMonitorGain.gain.value = autoPlayMode === 'file' ? 1 : 0;
             autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value) / 100;
+
+            if (autoPlayMode === 'system') {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                    setAutoStatus('System audio capture requires Chrome or Edge on HTTPS or localhost.');
+                    return;
+                }
+                navigator.mediaDevices.getDisplayMedia({ audio: true, video: true })
+                    .then(function (stream) {
+                        if (stream.getAudioTracks().length === 0) {
+                            stream.getTracks().forEach(function (track) { track.stop(); });
+                            setAutoStatus('No audio was shared. Select a tab and enable Share audio.');
+                            return;
+                        }
+                        autoDisplayStream = stream;
+                        autoSource = context.createMediaStreamSource(stream);
+                        autoSource.connect(autoAnalyser);
+                        autoPlayEnabled = true;
+                        setAutoStatus('Listening to shared tab or system audio.');
+                        autoPlayLoop();
+                    })
+                    .catch(function (err) {
+                        setAutoStatus('System audio sharing failed: ' + err.message);
+                    });
+                return;
+            }
 
             if (autoPlayMode === 'file') {
                 var fileInput = document.getElementById('autoAudioFile');
@@ -890,17 +1006,23 @@
                 if (autoMediaElementSource == null) {
                     autoMediaElementSource = context.createMediaElementSource(autoMediaElement);
                 }
-                autoMediaElement.src = URL.createObjectURL(fileInput.files[0]);
+                autoObjectUrl = URL.createObjectURL(fileInput.files[0]);
+                autoMediaElement.src = autoObjectUrl;
                 autoSource = autoMediaElementSource;
                 autoSource.connect(autoAnalyser);
-                autoAnalyser.connect(context.destination);
-                autoMediaElement.play();
                 autoPlayEnabled = true;
                 setAutoStatus('Following uploaded audio.');
-                autoPlayLoop();
+                autoMediaElement.play().then(autoPlayLoop).catch(function (err) {
+                    stopAutoPlay();
+                    setAutoStatus('Could not play the selected audio: ' + err.message);
+                });
                 return;
             }
 
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                setAutoStatus('Microphone access requires HTTPS or localhost in a supported browser.');
+                return;
+            }
             navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
                 .then(function (stream) {
                     autoMediaStream = stream;
@@ -1229,7 +1351,8 @@
                     <div class="w3-container w3-card w3-white">
                         <h3 class="w3-color w3-blue-gray w3-center">AI Auto Accompaniment</h3>
                         <p class="auto-help">
-                            Sing into the microphone, play a bhajan/Ramayanam recording nearby, or upload an audio file.
+                            For YouTube or another browser tab, choose <strong>Shared browser tab or system audio</strong>, then select the tab and enable <strong>Share audio</strong>.
+                            You can also sing into the microphone or upload an audio file.
                             The browser detects the strongest pitch and plays the closest harmonium note in real time.
                             Best results come from clear monophonic vocals or one lead melody at a time.
                         </p>
@@ -1239,10 +1362,13 @@
                             <tr><td>Frequency</td><td id="autoDetectedFrequency">-</td></tr>
                             <tr><td>Confidence</td><td id="autoConfidence">-</td></tr>
                         </table>
+                        <p>Input level</p>
+                        <div class="auto-meter" aria-label="Input level"><div id="autoInputLevel" class="auto-meter-fill"></div></div>
                         <p>
                             <label>Input</label>
                             <select id="autoPlayMode" class="w3-select">
-                                <option value="mic">Microphone / YouTube playing nearby</option>
+                                <option value="mic">Microphone / nearby speaker</option>
+                                <option value="system" selected>Shared browser tab or system audio</option>
                                 <option value="file">Uploaded audio file</option>
                             </select>
                         </p>
