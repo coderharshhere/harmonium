@@ -746,9 +746,12 @@
         var autoCurrentNote = null;
         var autoLastNoteStartedAt = 0;
         var autoSilenceStartedAt = 0;
-        var autoMinConfidence = 0.72;
+        // Vocals naturally have brief unvoiced syllables and soft transitions.
+        // Keep the last note sounding through those short gaps rather than
+        // cutting the accompaniment off between words.
+        var autoMinConfidence = 0.62;
         var autoSmoothingMs = 90;
-        var autoSilenceMs = 180;
+        var autoSilenceMs = 700;
         var autoMinRms = 0.012;
         var autoBuffer = null;
 
@@ -890,6 +893,9 @@
                 if (now - autoSilenceStartedAt > autoSilenceMs) {
                     stopAutoNote();
                     updateAutoDisplay(null, null, null);
+                    setAutoStatus('Waiting for the next sung note.');
+                } else if (autoCurrentNote != null) {
+                    setAutoStatus('Holding the last note through a brief vocal gap.');
                 }
             } else {
                 autoSilenceStartedAt = 0;
@@ -898,6 +904,7 @@
                 if (autoCurrentNote == null || (autoCurrentNote !== note && now - autoLastNoteStartedAt > autoSmoothingMs)) {
                     changeAutoNote(note);
                 }
+                setAutoStatus('Following your singing.');
             }
 
             autoAnimationId = requestAnimationFrame(autoPlayLoop);
@@ -925,7 +932,7 @@
             }
             stopAutoNote();
             if (autoSource != null) {
-                try { autoSource.disconnect(autoAnalyser); } catch (err) {}
+                try { autoSource.disconnect(); } catch (err) {}
                 autoSource = null;
             }
             if (autoMediaStream != null) {
@@ -945,9 +952,6 @@
                 URL.revokeObjectURL(autoObjectUrl);
                 autoObjectUrl = null;
             }
-            if (autoAnalyser != null) {
-                try { autoAnalyser.disconnect(); } catch (err) {}
-            }
             autoLastAnalysisAt = 0;
             autoSilenceStartedAt = 0;
             updateAutoDisplay(null, null, null);
@@ -965,8 +969,8 @@
             }
             autoPlayMode = document.getElementById('autoPlayMode').value;
             prepareAutoAnalyser();
-            autoMonitorGain.gain.value = autoPlayMode === 'file' ? 1 : 0;
-            autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value) / 100;
+            autoMonitorGain.gain.value = 0;
+            autoMinConfidence = parseInt(document.getElementById('autoSensitivity').value, 10) / 100;
 
             if (autoPlayMode === 'system') {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
@@ -1009,7 +1013,10 @@
                 autoMediaElement.src = autoObjectUrl;
                 autoSource = autoMediaElementSource;
                 autoSource.connect(autoAnalyser);
-                autoAnalyser.connect(context.destination);
+                // MediaElementSource redirects the audio element through the
+                // Web Audio graph, so route uploaded audio directly to the
+                // speakers while keeping the analyser's monitor muted.
+                autoSource.connect(context.destination);
                 autoPlayEnabled = true;
                 setAutoStatus('Following uploaded audio.');
                 autoMediaElement.play().then(autoPlayLoop).catch(function (err) {
@@ -1373,7 +1380,7 @@
                         </p>
                         <p>
                             <label>Accuracy filter</label>
-                            <input type="range" min="55" max="90" value="72" class="slider" id="autoSensitivity">
+                            <input type="range" min="55" max="90" value="62" class="slider" id="autoSensitivity">
                         </p>
                         <p><input id="autoAudioFile" class="w3-input" type="file" accept="audio/*"></p>
                         <audio id="autoAudioPlayer" controls class="w3-block"></audio>
